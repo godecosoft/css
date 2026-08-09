@@ -616,8 +616,16 @@
   var sondajBitti = false;
   var sondajCalisiyor = false;
   var sonSondaj = 0;
+  var sondajKuyrugu = [];
 
   function sondajla(bitince) {
+    // Sondaj sürerken gelen isteği DÜŞÜRMÜYORUZ, kuyruğa alıyoruz.
+    // Eskiden burada koşulsuz return vardı: zepcomBaslat'ın callback'siz
+    // sondajı sürerken embed'in sondajla(mountAll) çağrısı yutuluyor,
+    // sondaj bitince kimse mountAll'ı çağırmıyordu. Sonuç: host kutusu
+    // "gizle" işaretini almış ama iframe hiç kurulmamış oluyordu — yani
+    // bonus/çark sayfası bomboş kalıyordu.
+    if (bitince) sondajKuyrugu.push(bitince);
     if (sondajCalisiyor) return;
     sondajCalisiyor = true;
     sonSondaj = Date.now();
@@ -628,7 +636,11 @@
       kapandi = true;
       sondajCalisiyor = false;
       sondajBitti = true;
-      if (bitince) bitince();
+      // Kuyruğu boşaltarak çağır: callback'ler mountAll'ı tetikleyip
+      // yeniden sondaj isteyebilir, yeni istek yeni kuyruğa yazılsın.
+      var kuyruk = sondajKuyrugu;
+      sondajKuyrugu = [];
+      for (var i = 0; i < kuyruk.length; i++) kuyruk[i]();
     }
 
     // Ağ takılırsa embed hiç açılmasın istemiyoruz.
@@ -1028,6 +1040,11 @@
     '[data-mj="header-call-button"], [data-mj="header-telegram-button"], ' +
     '[data-mj="announcement"], ' +
     '[data-mj="info-page-content"], ' +
+    // Gömülü uygulamaların host kutusu (bonus, çark, skor, aranma talep) ve
+    // "Bonus Talep Et" modalı. Bunlar listede YOKTU: rota değişiminde /
+    // modal açılışında oluşan mutasyonlar "ilgisiz" sayılıp mountAll hiç
+    // çalışmıyor, dolayısıyla iframe hiç kurulmuyordu.
+    '[data-mj="page-content"], .modal, ' +
     '[data-mj="widget-pages"], [data-tb-trust-hub], ' +
     '[data-mj="widget-banner-link"]';
   var mountFrame = 0;
@@ -1052,6 +1069,15 @@
 
     if (target && target.nodeType === 1 && target.closest &&
         target.closest('[data-mj="info-page-content"]')) return true;
+
+    // Modal sekmeleri (t=bonus_offers) kabuğu yeniden eklemeden içeriği
+    // yerinde değiştiriyor; gömülü sayfa kutusu da öyle. Kabuk eklenmediği
+    // için addedNodes taraması bunları yakalamıyor.
+    if (target && target.nodeType === 1 && target.closest &&
+        target.closest('.modal')) return true;
+
+    if (target && target.nodeType === 1 && target.closest &&
+        target.closest('[data-mj="page-content"]')) return true;
 
     var i;
     for (i = 0; i < mutation.addedNodes.length; i++) {
@@ -1079,9 +1105,61 @@
     });
   }
 
+  /* ---------- SPA rota değişimi ----------
+
+     mountPageEmbeds ve mountModalEmbed kararlarını window.location'dan
+     veriyor (pathname / ?t=bonus_offers). React Router pushState ile
+     gezindiğinde URL değişir ama bunu haber veren bir DOM mutasyonu her
+     zaman olmaz — MutationObserver'a güvenmek bonus/çark sayfasının ve
+     bonus modalının açılmamasına yol açıyordu. URL'i ayrıca dinliyoruz.
+
+     Not: pushState senkron çalışır, React ekranı bir sonraki karede çizer.
+     Bu yüzden hem hemen hem de kısa bir gecikmeyle deniyoruz. */
+
+  function watchRouteChanges() {
+    var sonUrl = window.location.href;
+    var rotaTimer = 0;
+
+    function rotaDegisti() {
+      sonUrl = window.location.href;
+      clearTimeout(rotaTimer);
+      mountAll();
+      rotaTimer = setTimeout(mountAll, 250);
+    }
+
+    var yontemler = ['pushState', 'replaceState'];
+    for (var i = 0; i < yontemler.length; i++) {
+      (function (ad) {
+        var orijinal = window.history[ad];
+        if (typeof orijinal !== 'function') return;
+        try {
+          window.history[ad] = function () {
+            var sonuc = orijinal.apply(this, arguments);
+            rotaDegisti();
+            return sonuc;
+          };
+        } catch (e) {
+          /* Salt-okunur History: popstate/tıklama dalıyla idare ediyoruz. */
+        }
+      })(yontemler[i]);
+    }
+
+    window.addEventListener('popstate', rotaDegisti);
+    window.addEventListener('hashchange', rotaDegisti);
+
+    // History yamalanamadıysa son çare: site içi tıklamadan sonra URL
+    // gerçekten değiştiyse bir tur at.
+    document.addEventListener('click', function () {
+      setTimeout(function () {
+        if (window.location.href !== sonUrl) rotaDegisti();
+      }, 0);
+    }, true);
+  }
+
   function start() {
     mountAll();
     zepcomBaslat();
+    watchRouteChanges();
     new MutationObserver(scheduleMount).observe(document.body, {
       childList: true,
       subtree: true
